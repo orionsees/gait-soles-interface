@@ -1,3 +1,6 @@
+#!pip install websockets
+#!pip install pandas
+
 import json
 import asyncio
 import websockets
