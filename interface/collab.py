@@ -1,123 +1,152 @@
-#!pip install websockets
-#!pip install pandas
-
+import websocket
 import json
-import asyncio
-import websockets
-import pandas as pd
+import time
+from pymongo import MongoClient
 from datetime import datetime
-from google.colab import output
 
-# WebSocket server URL
-SERVER_URL = "wss://gait-soles-interface.onrender.com/ws"
+# Configuration
+WEBSOCKET_URL = "wss://gait-soles-interface.onrender.com/ws"
+MONGO_URI = "mongodb+srv://Harshad:gaitsoles12345@cluster0.s5ksuc8.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+DB_NAME = "sensorData"
+COLLECTION_NAME = "readings"
+RECONNECT_DELAY = 5  # Seconds between connection attempts
 
-# Create an empty DataFrame to store the data
-data_log = pd.DataFrame(columns=['timestamp', 'client_id', 'message', 'value'])
+class SensorProcessor:
+    def __init__(self):
+        self.ws = None
+        self.mongo_client = None
+        self.db = None
+        self.collection = None
+        self.connected = False
 
-async def connect_websocket():
-    global data_log
-    print("Connecting to WebSocket server...")
-    try:
-        async with websockets.connect(SERVER_URL) as websocket:
-            # Register as a processor client
-            register_message = {
-                "type": "register",
-                "role": "processor"
-            }
-            await websocket.send(json.dumps(register_message))
-            print("✅ Registered as processor client")
-            print("Waiting for real-time messages from ESP32...")
-            
-            # Keep listening for messages in real-time
-            while True:
-                message = await websocket.recv()
-                data = json.loads(message)
-                
-                # Get current timestamp
-                current_time = datetime.now()
-                timestamp_str = current_time.strftime('%H:%M:%S')
-                
-                # Extract data
-                client_id = data.get('clientId', 'unknown')
-                msg = data.get('message', 'No message')
-                value = data.get('value', 'No value')
-                
-                # Add data to DataFrame
-                new_row = pd.DataFrame({
-                    'timestamp': [current_time],
-                    'client_id': [client_id],
-                    'message': [msg],
-                    'value': [value]
-                })
-                data_log = pd.concat([data_log, new_row], ignore_index=True)
-                
-                # Clear previous output for cleaner display
-                output.clear()
-                
-                # Print received data
-                print(f"⏰ {timestamp_str} - Real-time message received:")
-                print(f"  From sensor: {client_id}")
-                print(f"  Message: {msg}")
-                print(f"  Value: {value}")
-                print("-" * 50)
-                
-                # Display the last 5 entries in the data log
-                print("\nData Log (Last 5 entries):")
-                display(data_log.tail(5))
-                
-                # Optional: Process and send back results immediately
-                processed_data = {
-                    "type": "processed",
-                    "message": f"Processed: {msg}",
-                    "originalValue": value,
-                    "processedValue": value * 2 if isinstance(value, (int, float)) else value  # Simple processing
+    def connect_mongo(self):
+        """Connect to MongoDB Atlas"""
+        try:
+            # Default Atlas SRV URI uses TLS by default
+            self.mongo_client = MongoClient(MONGO_URI)
+
+            # If you need to disable TLS validation (development only), use:
+            # self.mongo_client = MongoClient(
+            #     MONGO_URI,
+            #     tls=True,
+            #     tlsAllowInvalidCertificates=True
+            # )
+
+            self.db = self.mongo_client[DB_NAME]
+            self.collection = self.db[COLLECTION_NAME]
+            print("Successfully connected to MongoDB")
+        except Exception as e:
+            print(f"MongoDB connection failed: {e}")
+            raise
+
+    def on_message(self, ws, message):
+        """Handle incoming WebSocket messages"""
+        try:
+            data = json.loads(message)
+            if data.get('type') == 'sensor':
+                print(f"Received sensor data: {data['timestamp']}")
+
+                # Process data
+                processed_data = self.process_data(data)
+
+                # Store in MongoDB
+                self.store_data(processed_data)
+
+                # Send acknowledgement
+                ack = {
+                    "type": "ack",
+                    "original_timestamp": data['timestamp'],
+                    "processed_timestamp": datetime.utcnow().isoformat()
                 }
-                
-                # Send processed data back to server
-                await websocket.send(json.dumps(processed_data))
-                
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        # Save the complete data log to CSV when connection ends
-        if not data_log.empty:
-            filename = f"gait_data_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            data_log.to_csv(filename, index=False)
-            print(f"Data log saved to {filename}")
+                ws.send(json.dumps(ack))
 
-# Run the async function in a separate thread
-from IPython.display import display, HTML
+        except Exception as e:
+            print(f"Message handling error: {e}")
 
-print("Starting WebSocket client...")
-display(HTML("""
-<div>
-    <button onclick='google.colab.kernel.invokeFunction("button_click", [], {})' 
-            style="background-color:#f44336;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;">
-        Stop Connection
-    </button>
-    <button onclick='google.colab.kernel.invokeFunction("save_data", [], {})' 
-            style="background-color:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin-left:10px;">
-        Save Data Now
-    </button>
-</div>
-"""))
+    def process_data(self, raw_data):
+        """Process raw sensor data"""
+        processed = {
+            "metadata": {
+                "received_at": datetime.utcnow().isoformat(),
+                "processing_note": "Basic conversion"
+            },
+            "sensors": raw_data['data'],
+            "original_timestamp": raw_data['timestamp'],
+            "status": "processed"
+        }
 
-def button_click():
-    import os
-    print("Stopping connection and saving data...")
-    os._exit(0)  # Force stop the execution
+        # Simple stats
+        values = list(raw_data['data'].values())
+        processed['stats'] = {
+            "average": sum(values) / len(values) if values else 0,
+            "max": max(values) if values else 0,
+            "min": min(values) if values else 0
+        }
 
-def save_data():
-    global data_log
-    if not data_log.empty:
-        filename = f"gait_data_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        data_log.to_csv(filename, index=False)
-        print(f"Data saved to {filename}")
-    else:
-        print("No data to save yet")
+        return processed
 
-output.register_callback('button_click', button_click)
-output.register_callback('save_data', save_data)
+    def store_data(self, data):
+        """Store processed data in MongoDB"""
+        try:
+            result = self.collection.insert_one(data)
+            print(f"Stored document ID: {result.inserted_id}")
+            return True
+        except Exception as e:
+            print(f"Database storage error: {e}")
+            return False
 
-# Run the WebSocket client
-await connect_websocket()
+    def on_error(self, ws, error):
+        print(f"WebSocket Error: {error}")
+        self.connected = False
+
+    def on_close(self, ws, close_status_code, close_msg):
+        print(f"WebSocket closed: {close_msg} (code: {close_status_code})")
+        self.connected = False
+
+    def on_open(self, ws):
+        print("Connected to WebSocket server")
+        self.connected = True
+        # Register as processor
+        ws.send(json.dumps({
+            "type": "register",
+            "role": "processor"
+        }))
+
+    def connect_websocket(self):
+        """Initialize WebSocket connection"""
+        self.ws = websocket.WebSocketApp(
+            WEBSOCKET_URL,
+            on_open=self.on_open,
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+
+    def run(self):
+        """Main processing loop"""
+        print("Starting sensor processor...")
+
+        # Connect to MongoDB first
+        self.connect_mongo()
+
+        # Maintain connection
+        while True:
+            try:
+                if not self.connected:
+                    print("Connecting to WebSocket server...")
+                    self.connect_websocket()
+                    # Run WebSocket in blocking mode (TLS defaults)
+                    self.ws.run_forever()
+                else:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("Shutting down...")
+                break
+            except Exception as e:
+                print(f"Connection error: {e}")
+                print(f"Reconnecting in {RECONNECT_DELAY} seconds...")
+                time.sleep(RECONNECT_DELAY)
+
+if __name__ == "__main__":
+    processor = SensorProcessor()
+    processor.run()
