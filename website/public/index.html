@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gait Phase Monitoring</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f2f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .phase-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+        }
+        .sensor-item {
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            background: #f8f9fa;
+        }
+        .active {
+            background: #4CAF50;
+            color: white;
+        }
+        #timeline {
+            margin-top: 30px;
+        }
+        .timeline-item {
+            padding: 10px;
+            margin: 5px 0;
+            background: white;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Gait Phase Monitoring System</h1>
+        
+        <div class="phase-card">
+            <h2>Current Phase: <span id="currentPhase">Loading...</span></h2>
+            <p>Confidence: <span id="confidence">-</span></p>
+        </div>
+
+        <h2>Sensor Status</h2>
+        <div class="sensor-grid" id="sensorGrid"></div>
+
+        <h2>Phase Timeline</h2>
+        <div id="timeline"></div>
+    </div>
+
+    <script>
+        // MongoDB Configuration
+        const MONGODB_URI = "mongodb+srv://cosmicsahil:gaitsole@cluster0.fz3ohcg.mongodb.net/gait_data?retryWrites=true&w=majority";
+        const DB_NAME = "gait_data";
+        const COLLECTION_NAME = "phases";
+
+        // WebSocket Configuration
+        const WS_URL = "wss://gait-soles-interface.onrender.com/ws";
+        
+        // Initialize WebSocket
+        const socket = new WebSocket(WS_URL);
+        
+        // Phase Color Mapping
+        const phaseColors = {
+            'Heel Strike': '#e74c3c',
+            'Mid-Stance': '#2ecc71',
+            'Push-Off': '#f1c40f',
+            'Swing': '#3498db',
+            'Transition': '#9b59b6'
+        };
+
+        // Initialize Sensor Grid
+        function initSensorGrid() {
+            const sensors = {
+                'fsr25': 'Heel Sensor',
+                'fsr26': 'Mid-Foot',
+                'fsr27': 'Lateral',
+                'fsr34': 'Metatarsal',
+                'fsr35': 'Toe Sensor'
+            };
+
+            const grid = document.getElementById('sensorGrid');
+            grid.innerHTML = Object.entries(sensors)
+                .map(([id, label]) => `
+                    <div class="sensor-item" id="${id}">
+                        <h3>${label}</h3>
+                        <div class="status">OFF</div>
+                    </div>
+                `).join('');
+        }
+
+        // Update Display
+        function updateDisplay(data) {
+            // Update current phase
+            const phaseElement = document.getElementById('currentPhase');
+            phaseElement.textContent = data.phase;
+            phaseElement.style.color = phaseColors[data.phase.split(' ')[0]] || '#000';
+
+            // Update confidence
+            document.getElementById('confidence').textContent = 
+                `${Math.round(data.confidence * 100)}%`;
+
+            // Update sensors
+            Object.entries(data.binary_data).forEach(([sensor, value]) => {
+                const element = document.getElementById(sensor);
+                if(element) {
+                    element.querySelector('.status').textContent = value ? 'ACTIVE' : 'INACTIVE';
+                    element.style.backgroundColor = value ? '#4CAF50' : '#f8f9fa';
+                    element.style.color = value ? 'white' : 'inherit';
+                }
+            });
+
+            // Add to timeline
+            const timeline = document.getElementById('timeline');
+            const entry = document.createElement('div');
+            entry.className = 'timeline-item';
+            entry.innerHTML = `
+                <strong>${new Date(data.timestamp).toLocaleTimeString()}</strong>
+                <span>${data.phase}</span>
+                <span>${Math.round(data.confidence * 100)}%</span>
+            `;
+            timeline.prepend(entry);
+        }
+
+        // WebSocket Handlers
+        socket.onopen = () => {
+            console.log('Connected to WebSocket server');
+            initSensorGrid();
+            socket.send(JSON.stringify({
+                type: 'register',
+                role: 'dashboard'
+            }));
+        };
+
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if(data.type === 'processed') {
+                    updateDisplay(data);
+                }
+            } catch(error) {
+                console.error('Error processing message:', error);
+            }
+        };
+
+        socket.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+
+        socket.onclose = () => {
+            console.log('WebSocket connection closed');
+            setTimeout(() => location.reload(), 2000);
+        };
+    </script>
+</body>
+</html>
